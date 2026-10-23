@@ -1,0 +1,142 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My DevOps To-Do App</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f1f5f9;
+            margin: 0;
+            padding: 40px 16px;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: auto;
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.08);
+        }
+
+        h1 {
+            text-align: center;
+            color: #1e293b;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #64748b;
+        }
+
+        .add-form {
+            display: flex;
+            gap: 10px;
+            margin: 25px 0;
+        }
+
+        input {
+            flex: 1;
+            min-width: 0;
+            padding: 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+        }
+
+        button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            color: white;
+            background: #2563eb;
+        }
+
+        .task {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .task-title {
+            flex: 1;
+            overflow-wrap: anywhere;
+        }
+
+        .completed {
+            text-decoration: line-through;
+            color: #94a3b8;
+        }
+
+        .actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .done {
+            background: #16a34a;
+        }
+
+        .delete {
+            background: #dc2626;
+        }
+
+        .empty {
+            text-align: center;
+            color: #64748b;
+            padding: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>My DevOps To-Do App</h1>
+        <p class="subtitle">Flask + Docker + Jenkins + Kubernetes</p>
+
+        <form class="add-form" action="{{ url_for('add_task') }}" method="POST">
+            <input
+                type="text"
+                name="title"
+                placeholder="Enter a new task..."
+                maxlength="200"
+                required
+            >
+            <button type="submit">Add</button>
+        </form>
+
+        {% for task in tasks %}
+        <div class="task">
+            <span class="task-title {% if task['completed'] %}completed{% endif %}">
+                {{ task['title'] }}
+            </span>
+
+            <div class="actions">
+                {% if not task['completed'] %}
+                <form action="{{ url_for('complete_task', task_id=task['id']) }}" method="POST">
+                    <button class="done" type="submit">Done</button>
+                </form>
+                {% endif %}
+
+                <form action="{{ url_for('delete_task', task_id=task['id']) }}" method="POST">
+                    <button class="delete" type="submit">Delete</button>
+                </form>
+            </div>
+        </div>
+        {% else %}
+        <p class="empty">No tasks yet. Add your first task!</p>
+        {% endfor %}
+    </div>
+</body>
+</html>
