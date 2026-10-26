@@ -1,4 +1,3 @@
-
 pipeline {
     agent {
         label 'todo-agent'
@@ -6,10 +5,35 @@ pipeline {
 
     options {
         timestamps()
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        string(
+            name: 'MANIFEST_DIR',
+            defaultValue: 'k8s',
+            description: 'Repository folder containing Kubernetes YAML files'
+        )
+        string(
+            name: 'DEPLOYMENT_NAME',
+            defaultValue: 'todo-app',
+            description: 'Kubernetes Deployment name'
+        )
+        string(
+            name: 'CONTAINER_NAME',
+            defaultValue: 'todo-app',
+            description: 'Container name inside the Deployment'
+        )
+        string(
+            name: 'K8S_NAMESPACE',
+            defaultValue: 'default',
+            description: 'Existing Kubernetes namespace'
+        )
     }
 
     environment {
         IMAGE_NAME = 'aaditya4512/todo-app'
+        CONTROLLER_HOST = '172.31.9.27'
     }
 
     stages {
@@ -23,6 +47,7 @@ pipeline {
         stage('Python Tests') {
             steps {
                 sh '''
+                    set -eu
                     python3 -m venv .venv
                     .venv/bin/python -m pip install -r requirements.txt
                     .venv/bin/python -m pytest -v
@@ -33,8 +58,8 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
-                    docker build -t $IMAGE_NAME:$BUILD_NUMBER .
-                    docker image ls $IMAGE_NAME
+                    set -eu
+                    docker build -t "$IMAGE_NAME:$BUILD_NUMBER" .
                 '''
             }
         }
@@ -49,13 +74,87 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         set +x
-                        echo "$DOCKER_TOKEN" | docker login \
-                            --username "$DOCKER_USER" \
-                            --password-stdin
+                        export DOCKER_CONFIG="$(mktemp -d)"
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+
+                        printf '%s' "$DOCKER_TOKEN" |
+                            docker login \
+                                --username "$DOCKER_USER" \
+                                --password-stdin
 
                         docker push "$IMAGE_NAME:$BUILD_NUMBER"
-                        docker logout
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to KIND') {
+            steps {
+                sshagent(credentials: ['controller-ssh']) {
+                    sh '''
+                        set -eu
+
+                        # Validate parameters before using them remotely.
+                        for value in "$DEPLOYMENT_NAME" "$CONTAINER_NAME" "$K8S_NAMESPACE"; do
+                            case "$value" in
+                                ""|*[!a-z0-9.-]*)
+                                    echo "Invalid Kubernetes name: $value"
+                                    exit 1
+                                    ;;
+                            esac
+                        done
+
+                        test -d "$MANIFEST_DIR"
+
+                        REMOTE_DIR=$(ssh -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            "ubuntu@$CONTROLLER_HOST" \
+                            'mktemp -d /tmp/todo-deploy.XXXXXXXX')
+
+                        trap 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                            "ubuntu@$CONTROLLER_HOST" \
+                            "rm -rf -- $REMOTE_DIR"' EXIT
+
+                        scp -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            -r "$MANIFEST_DIR/." \
+                            "ubuntu@$CONTROLLER_HOST:$REMOTE_DIR/"
+
+                        ssh -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            "ubuntu@$CONTROLLER_HOST" \
+                            bash -s -- \
+                            "$REMOTE_DIR" "$K8S_NAMESPACE" \
+                            "$DEPLOYMENT_NAME" "$CONTAINER_NAME" \
+                            "$IMAGE_NAME:$BUILD_NUMBER" <<'REMOTE'
+set -eu
+
+manifest_dir="$1"
+namespace="$2"
+deployment="$3"
+container="$4"
+image="$5"
+
+export KUBECONFIG="$HOME/kind-kubeconfig"
+
+# Render the manifests with this build's image before applying.
+kubectl set image \
+    -f "$manifest_dir" \
+    "$container=$image" \
+    --local -o yaml > "$manifest_dir/rendered.yaml.tmp"
+
+kubectl --context kind-todo-cluster \
+    -n "$namespace" apply -f "$manifest_dir/rendered.yaml.tmp"
+
+kubectl --context kind-todo-cluster \
+    -n "$namespace" rollout status \
+    "deployment/$deployment" --timeout=180s
+
+kubectl --context kind-todo-cluster \
+    -n "$namespace" get pods,services
+REMOTE
                     '''
                 }
             }
@@ -64,11 +163,11 @@ pipeline {
 
     post {
         success {
-            echo 'CI pipeline and Docker Hub push successful!'
+            echo 'Tests, Docker Hub push and KIND deployment successful!'
         }
 
         failure {
-            echo 'Pipeline failed. Check console output.'
+            echo 'Pipeline failed. Check the failed stage in console output.'
         }
     }
 }
