@@ -6,6 +6,7 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        skipDefaultCheckout()
     }
 
     parameters {
@@ -92,43 +93,50 @@ pipeline {
 
         stage('Deploy to KIND') {
             steps {
-                sshagent(credentials: ['controller-ssh']) {
-                    sh '''
-                        set -eu
+                timeout(time: 5, unit: 'MINUTES') {
+                    sshagent(credentials: ['controller-ssh']) {
+                        sh '''
+                            set -eu
 
-                        # Validate parameters before using them remotely.
-                        for value in "$DEPLOYMENT_NAME" "$CONTAINER_NAME" "$K8S_NAMESPACE"; do
-                            case "$value" in
-                                ""|*[!a-z0-9.-]*)
-                                    echo "Invalid Kubernetes name: $value"
-                                    exit 1
-                                    ;;
-                            esac
-                        done
+                            for value in "$DEPLOYMENT_NAME" "$CONTAINER_NAME" "$K8S_NAMESPACE"; do
+                                case "$value" in
+                                    ""|*[!a-z0-9.-]*)
+                                        echo "Invalid Kubernetes name: $value"
+                                        exit 1
+                                        ;;
+                                esac
+                            done
 
-                        test -d "$MANIFEST_DIR"
+                            test -d "$MANIFEST_DIR"
 
-                        REMOTE_DIR=$(ssh -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            "ubuntu@$CONTROLLER_HOST" \
-                            'mktemp -d /tmp/todo-deploy.XXXXXXXX')
+                            REMOTE_DIR=$(ssh \
+                                -o BatchMode=yes \
+                                -o ConnectTimeout=15 \
+                                -o StrictHostKeyChecking=yes \
+                                "ubuntu@$CONTROLLER_HOST" \
+                                'mktemp -d /tmp/todo-deploy.XXXXXXXX')
 
-                        trap 'ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-                            "ubuntu@$CONTROLLER_HOST" \
-                            "rm -rf -- $REMOTE_DIR"' EXIT
+                            trap 'ssh -o BatchMode=yes -o ConnectTimeout=15 \
+                                -o StrictHostKeyChecking=yes \
+                                "ubuntu@$CONTROLLER_HOST" \
+                                "rm -rf -- $REMOTE_DIR"' EXIT
 
-                        scp -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -r "$MANIFEST_DIR/." \
-                            "ubuntu@$CONTROLLER_HOST:$REMOTE_DIR/"
+                            scp \
+                                -o BatchMode=yes \
+                                -o ConnectTimeout=15 \
+                                -o StrictHostKeyChecking=yes \
+                                -r "$MANIFEST_DIR/." \
+                                "ubuntu@$CONTROLLER_HOST:$REMOTE_DIR/"
 
-                        ssh -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            "ubuntu@$CONTROLLER_HOST" \
-                            bash -s -- \
-                            "$REMOTE_DIR" "$K8S_NAMESPACE" \
-                            "$DEPLOYMENT_NAME" "$CONTAINER_NAME" \
-                            "$IMAGE_NAME:$BUILD_NUMBER" <<'REMOTE'
+                            ssh \
+                                -o BatchMode=yes \
+                                -o ConnectTimeout=15 \
+                                -o StrictHostKeyChecking=yes \
+                                "ubuntu@$CONTROLLER_HOST" \
+                                bash -s -- \
+                                "$REMOTE_DIR" "$K8S_NAMESPACE" \
+                                "$DEPLOYMENT_NAME" "$CONTAINER_NAME" \
+                                "$IMAGE_NAME:$BUILD_NUMBER" <<'REMOTE'
 set -eu
 
 manifest_dir="$1"
@@ -139,23 +147,32 @@ image="$5"
 
 export KUBECONFIG="$HOME/kind-kubeconfig"
 
-# Render the manifests with this build's image before applying.
-kubectl set image \
-    -f "$manifest_dir" \
-    "$container=$image" \
-    --local -o yaml > "$manifest_dir/rendered.yaml.tmp"
+kube() {
+    kubectl --context kind-todo-cluster -n "$namespace" "$@"
+}
 
-kubectl --context kind-todo-cluster \
-    -n "$namespace" apply -f "$manifest_dir/rendered.yaml.tmp"
+test -r "$KUBECONFIG"
 
-kubectl --context kind-todo-cluster \
-    -n "$namespace" rollout status \
-    "deployment/$deployment" --timeout=180s
+# Apply both deployment.yaml and service.yaml.
+kube apply -f "$manifest_dir"
 
-kubectl --context kind-todo-cluster \
-    -n "$namespace" get pods,services
+# Update the container image only in the Deployment.
+kube set image "deployment/$deployment" "$container=$image"
+
+# Wait until the new application Pods are ready.
+if ! kube rollout status "deployment/$deployment" --timeout=180s; then
+    echo "Deployment did not become ready. Diagnostic output:"
+    kube get pods -o wide || true
+    kube describe "deployment/$deployment" || true
+    kube get events --sort-by=.metadata.creationTimestamp || true
+    exit 1
+fi
+
+kube get "deployment/$deployment" -o wide
+kube get pods,services
 REMOTE
-                    '''
+                        '''
+                    }
                 }
             }
         }
